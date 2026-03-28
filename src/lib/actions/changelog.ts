@@ -32,6 +32,7 @@ export interface ChangeLogEntry {
 }
 
 export async function logHabitChange(entry: {
+  user_id?: string | null;
   habit_id: string | null;
   habit_name: string;
   event: ChangeEvent;
@@ -40,6 +41,7 @@ export async function logHabitChange(entry: {
 }): Promise<void> {
   await prisma.habitChangeLog.create({
     data: {
+      user_id: entry.user_id ?? undefined,
       habit_id: entry.habit_id,
       habit_name: entry.habit_name,
       event: entry.event,
@@ -49,8 +51,9 @@ export async function logHabitChange(entry: {
   });
 }
 
-export async function getChangeLog(): Promise<ChangeLogEntry[]> {
+export async function getChangeLog(userId?: string): Promise<ChangeLogEntry[]> {
   const rows = await prisma.habitChangeLog.findMany({
+    where: userId ? { user_id: userId } : undefined,
     orderBy: { created_at: 'desc' },
     take: 200,
   });

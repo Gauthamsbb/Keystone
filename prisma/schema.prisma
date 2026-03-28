@@ -8,10 +8,38 @@ datasource db {
   directUrl = env("DIRECT_URL")
 }
 
+model Profile {
+  id            String           @id
+  email         String           @unique
+  role          String           @default("user")
+  created_at    DateTime         @default(now())
+  auditLogs     AdminAuditLog[]
+  changeLogs    HabitChangeLog[]
+  habitSections HabitSection[]
+  habits        Habit[]
+  rewardBuckets RewardBucket[]
+
+  @@map("profiles")
+}
+
+model AdminAuditLog {
+  id         String   @id @default(uuid())
+  user_id    String
+  action     String
+  table_name String
+  record_id  String
+  details    Json?
+  created_at DateTime @default(now())
+  user       Profile  @relation(fields: [user_id], references: [id])
+
+  @@index([user_id])
+  @@index([created_at])
+  @@map("admin_audit_logs")
+}
+
 model Habit {
   id                  String        @id @default(uuid())
   name                String
-  subtitle            String?
   is_active           Boolean       @default(true)
   weekly_quota        Int
   input_schema        Json
@@ -19,9 +47,13 @@ model Habit {
   completion_limit    Json?
   timing_field_id     Int?
   display_order       Int           @default(0)
+  subtitle            String?
+  user_id             String
   bucketHabits        BucketHabit[]
   entries             Entry[]
+  user                Profile       @relation(fields: [user_id], references: [id], onDelete: SetNull)
 
+  @@index([user_id])
   @@map("habits")
 }
 
@@ -30,7 +62,10 @@ model HabitSection {
   title         String
   subtitle      String?
   display_order Int     @default(0)
+  user_id       String
+  user          Profile @relation(fields: [user_id], references: [id], onDelete: SetNull)
 
+  @@index([user_id])
   @@map("habit_sections")
 }
 
@@ -41,7 +76,10 @@ model HabitChangeLog {
   event      String
   details    Json?
   created_at DateTime @default(now())
+  user_id    String?
+  user       Profile? @relation(fields: [user_id], references: [id])
 
+  @@index([user_id])
   @@map("habit_change_logs")
 }
 
@@ -77,9 +115,12 @@ model RewardBucket {
   description   String?
   display_order Int               @default(0)
   created_at    DateTime          @default(now())
+  user_id       String
   habits        BucketHabit[]
   milestones    BucketMilestone[]
+  user          Profile           @relation(fields: [user_id], references: [id], onDelete: SetNull)
 
+  @@index([user_id])
   @@map("reward_buckets")
 }
 

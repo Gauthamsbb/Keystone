@@ -12,6 +12,8 @@ import type {
 } from '@/lib/types/schema';
 import { getHabits } from './habits';
 import { calculateStreak } from '@/lib/utils/progress';
+import { getCurrentUser } from '@/lib/supabase/get-user';
+import { writeAuditLog } from './audit';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -115,7 +117,15 @@ function toEntryRecord(raw: {
 // ── Server Actions ────────────────────────────────────────────────────────────
 
 export async function upsertEntry(input: UpsertEntryInput): Promise<EntryRecord> {
+  const user = await getCurrentUser();
   const date = parseDate(input.date);
+
+  // Verify the habit belongs to the current user before writing
+  const habit = await prisma.habit.findFirst({
+    where: { id: input.habit_id, user_id: user.id },
+    select: { id: true },
+  });
+  if (!habit) throw new Error('Habit not found');
 
   // Find or create the parent Entry row
   const entry = await prisma.entry.upsert({
@@ -143,13 +153,19 @@ export async function upsertEntry(input: UpsertEntryInput): Promise<EntryRecord>
     include: { values: true },
   });
 
+  await writeAuditLog(user.id, 'entry_upserted', 'entries', entry.id, {
+    habit_id: input.habit_id,
+    date: input.date,
+  });
+
   return toEntryRecord(fresh);
 }
 
 export async function getEntriesByDate(dateStr: string): Promise<EntryWithHabit[]> {
+  const user = await getCurrentUser();
   const date = parseDate(dateStr);
   const entries = await prisma.entry.findMany({
-    where: { date },
+    where: { date, habit: { user_id: user.id } },
     include: { habit: true, values: true },
   });
 
@@ -172,13 +188,14 @@ export async function getHabitHistory(
   habitId: string,
   weeks: number
 ): Promise<EntryRecord[]> {
+  const user = await getCurrentUser();
   const now = new Date();
   const startDate = new Date(now);
   startDate.setUTCDate(startDate.getUTCDate() - weeks * 7);
   startDate.setUTCHours(0, 0, 0, 0);
 
   const entries = await prisma.entry.findMany({
-    where: { habit_id: habitId, date: { gte: startDate } },
+    where: { habit_id: habitId, habit: { user_id: user.id }, date: { gte: startDate } },
     include: { values: true },
     orderBy: { date: 'asc' },
   });

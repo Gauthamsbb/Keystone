@@ -19,6 +19,11 @@
   --font-mono: var(--font-geist-mono);
 }
 
+@keyframes slideInLeft {
+  from { transform: translateX(-100%); }
+  to   { transform: translateX(0); }
+}
+
 html {
   scroll-behavior: smooth;
 }

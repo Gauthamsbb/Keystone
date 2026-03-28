@@ -12,6 +12,8 @@ import type {
   UpdateHabitInput,
 } from '@/lib/types/schema';
 import { logHabitChange } from './changelog';
+import { writeAuditLog } from './audit';
+import { getCurrentUser } from '@/lib/supabase/get-user';
 
 function toHabitRecord(raw: {
   id: string;
@@ -40,20 +42,26 @@ function toHabitRecord(raw: {
 }
 
 export async function getHabits(): Promise<HabitRecord[]> {
+  const user = await getCurrentUser();
   const habits = await prisma.habit.findMany({
+    where: { user_id: user.id },
     orderBy: [{ display_order: 'asc' }, { is_active: 'desc' }, { name: 'asc' }],
   });
   return habits.map(toHabitRecord);
 }
 
 export async function getHabitById(id: string): Promise<HabitRecord | null> {
-  const habit = await prisma.habit.findUnique({ where: { id } });
+  const user = await getCurrentUser();
+  const habit = await prisma.habit.findFirst({ where: { id, user_id: user.id } });
   if (!habit) return null;
   return toHabitRecord(habit);
 }
 
 export async function createHabit(input: CreateHabitInput): Promise<HabitRecord> {
+  const user = await getCurrentUser();
+
   const maxOrder = await prisma.habit.findFirst({
+    where: { user_id: user.id },
     orderBy: { display_order: 'desc' },
     select: { display_order: true },
   });
@@ -61,6 +69,7 @@ export async function createHabit(input: CreateHabitInput): Promise<HabitRecord>
 
   const habit = await prisma.habit.create({
     data: {
+      user_id: user.id,
       name: input.name,
       subtitle: input.subtitle?.trim() || null,
       is_active: input.is_active,
@@ -75,17 +84,19 @@ export async function createHabit(input: CreateHabitInput): Promise<HabitRecord>
     },
   });
 
-  await logHabitChange({ habit_id: habit.id, habit_name: habit.name, event: 'created' });
+  await logHabitChange({ user_id: user.id, habit_id: habit.id, habit_name: habit.name, event: 'created' });
+  await writeAuditLog(user.id, 'habit_created', 'habits', habit.id, { name: habit.name });
 
   revalidatePath('/');
   return toHabitRecord(habit);
 }
 
 export async function updateHabit(input: UpdateHabitInput): Promise<HabitRecord> {
+  const user = await getCurrentUser();
   const { id, ...data } = input;
 
-  // Fetch old state to detect what changed
-  const old = await prisma.habit.findUnique({ where: { id } });
+  const old = await prisma.habit.findFirst({ where: { id, user_id: user.id } });
+  if (!old) throw new Error('Habit not found');
 
   const habit = await prisma.habit.update({
     where: { id },
@@ -102,97 +113,102 @@ export async function updateHabit(input: UpdateHabitInput): Promise<HabitRecord>
     },
   });
 
-  if (old) {
-    const habitName = data.name?.trim() ?? old.name;
+  const habitName = data.name?.trim() ?? old.name;
 
-    if (data.is_active !== undefined && data.is_active !== old.is_active) {
+  if (data.is_active !== undefined && data.is_active !== old.is_active) {
+    await logHabitChange({
+      user_id: user.id,
+      habit_id: id,
+      habit_name: habitName,
+      event: data.is_active ? 'activated' : 'archived',
+    });
+  }
+
+  if (data.weekly_quota !== undefined && data.weekly_quota !== old.weekly_quota) {
+    await logHabitChange({
+      user_id: user.id,
+      habit_id: id,
+      habit_name: habitName,
+      event: 'quota_changed',
+      details: { from: old.weekly_quota, to: data.weekly_quota },
+    });
+  }
+
+  if (data.input_schema !== undefined) {
+    const oldSchema = Array.isArray(old.input_schema) ? (old.input_schema as unknown as InputSchema) : [];
+    const newSchema = data.input_schema;
+    const oldIds = new Set(oldSchema.map((f) => f.id));
+    const newIds = new Set(newSchema.map((f) => f.id));
+    const added = newSchema.filter((f) => !oldIds.has(f.id)).map((f) => f.label || `(${f.type})`);
+    const removed = oldSchema.filter((f) => !newIds.has(f.id)).map((f) => f.label || `(${f.type})`);
+    if (added.length > 0 || removed.length > 0) {
       await logHabitChange({
+        user_id: user.id,
         habit_id: id,
         habit_name: habitName,
-        event: data.is_active ? 'activated' : 'archived',
+        event: 'fields_changed',
+        details: { added, removed },
       });
     }
 
-    if (data.weekly_quota !== undefined && data.weekly_quota !== old.weekly_quota) {
-      await logHabitChange({
-        habit_id: id,
-        habit_name: habitName,
-        event: 'quota_changed',
-        details: { from: old.weekly_quota, to: data.weekly_quota },
-      });
-    }
-
-    if (data.input_schema !== undefined) {
-      const oldSchema = Array.isArray(old.input_schema) ? (old.input_schema as unknown as InputSchema) : [];
-      const newSchema = data.input_schema;
-      const oldIds = new Set(oldSchema.map((f) => f.id));
-      const newIds = new Set(newSchema.map((f) => f.id));
-      const added = newSchema.filter((f) => !oldIds.has(f.id)).map((f) => f.label || `(${f.type})`);
-      const removed = oldSchema.filter((f) => !newIds.has(f.id)).map((f) => f.label || `(${f.type})`);
-      if (added.length > 0 || removed.length > 0) {
+    for (const newField of newSchema) {
+      const oldField = oldSchema.find((f) => f.id === newField.id);
+      if (!oldField) continue;
+      if (!oldField.is_archived && newField.is_archived) {
         await logHabitChange({
+          user_id: user.id,
           habit_id: id,
           habit_name: habitName,
-          event: 'fields_changed',
-          details: { added, removed },
+          event: 'field_archived',
+          details: { field_label: newField.label || `(${newField.type})` },
         });
-      }
-
-      // Detect per-field archive/unarchive
-      for (const newField of newSchema) {
-        const oldField = oldSchema.find((f) => f.id === newField.id);
-        if (!oldField) continue;
-        if (!oldField.is_archived && newField.is_archived) {
-          await logHabitChange({
-            habit_id: id,
-            habit_name: habitName,
-            event: 'field_archived',
-            details: { field_label: newField.label || `(${newField.type})` },
-          });
-        } else if (oldField.is_archived && !newField.is_archived) {
-          await logHabitChange({
-            habit_id: id,
-            habit_name: habitName,
-            event: 'field_unarchived',
-            details: { field_label: newField.label || `(${newField.type})` },
-          });
-        }
-      }
-    }
-
-    if ('completion_limit' in data) {
-      const oldLimit = old.completion_limit as CompletionLimit | null;
-      const newLimit = data.completion_limit ?? null;
-      const changed =
-        JSON.stringify(oldLimit) !== JSON.stringify(newLimit);
-      if (changed) {
+      } else if (oldField.is_archived && !newField.is_archived) {
         await logHabitChange({
+          user_id: user.id,
           habit_id: id,
           habit_name: habitName,
-          event: 'completion_limit_changed',
-          details: { from: oldLimit, to: newLimit },
+          event: 'field_unarchived',
+          details: { field_label: newField.label || `(${newField.type})` },
         });
       }
     }
   }
+
+  if ('completion_limit' in data) {
+    const oldLimit = old.completion_limit as CompletionLimit | null;
+    const newLimit = data.completion_limit ?? null;
+    if (JSON.stringify(oldLimit) !== JSON.stringify(newLimit)) {
+      await logHabitChange({
+        user_id: user.id,
+        habit_id: id,
+        habit_name: habitName,
+        event: 'completion_limit_changed',
+        details: { from: oldLimit, to: newLimit },
+      });
+    }
+  }
+
+  await writeAuditLog(user.id, 'habit_updated', 'habits', id, { name: habitName });
 
   revalidatePath('/');
   return toHabitRecord(habit);
 }
 
 export async function deleteHabit(id: string): Promise<void> {
-  const habit = await prisma.habit.findUnique({ where: { id }, select: { name: true } });
+  const user = await getCurrentUser();
+  const habit = await prisma.habit.findFirst({ where: { id, user_id: user.id }, select: { name: true } });
+  if (!habit) throw new Error('Habit not found');
   await prisma.habit.delete({ where: { id } });
-  if (habit) {
-    await logHabitChange({ habit_id: null, habit_name: habit.name, event: 'deleted' });
-  }
+  await logHabitChange({ user_id: user.id, habit_id: null, habit_name: habit.name, event: 'deleted' });
+  await writeAuditLog(user.id, 'habit_deleted', 'habits', id, { name: habit.name });
   revalidatePath('/');
 }
 
 export async function reorderHabits(ids: string[]): Promise<void> {
+  const user = await getCurrentUser();
   await prisma.$transaction(
     ids.map((id, index) =>
-      prisma.habit.update({ where: { id }, data: { display_order: index } })
+      prisma.habit.updateMany({ where: { id, user_id: user.id }, data: { display_order: index } })
     )
   );
   revalidatePath('/');
@@ -218,9 +234,10 @@ function toSectionRecord(raw: {
 }
 
 export async function getHabitListItems(): Promise<HabitListItem[]> {
+  const user = await getCurrentUser();
   const [habits, sections] = await Promise.all([
-    prisma.habit.findMany({ orderBy: [{ display_order: 'asc' }, { name: 'asc' }] }),
-    prisma.habitSection.findMany({ orderBy: { display_order: 'asc' } }),
+    prisma.habit.findMany({ where: { user_id: user.id }, orderBy: [{ display_order: 'asc' }, { name: 'asc' }] }),
+    prisma.habitSection.findMany({ where: { user_id: user.id }, orderBy: { display_order: 'asc' } }),
   ]);
 
   const items: HabitListItem[] = [
@@ -235,18 +252,19 @@ export async function getHabitListItems(): Promise<HabitListItem[]> {
 export async function reorderItems(
   items: { id: string; type: 'habit' | 'section' }[]
 ): Promise<void> {
+  const user = await getCurrentUser();
   await prisma.$transaction([
     ...items
       .filter((i) => i.type === 'habit')
-      .map((i, _) => {
+      .map((i) => {
         const order = items.findIndex((x) => x.id === i.id);
-        return prisma.habit.update({ where: { id: i.id }, data: { display_order: order } });
+        return prisma.habit.updateMany({ where: { id: i.id, user_id: user.id }, data: { display_order: order } });
       }),
     ...items
       .filter((i) => i.type === 'section')
       .map((i) => {
         const order = items.findIndex((x) => x.id === i.id);
-        return prisma.habitSection.update({ where: { id: i.id }, data: { display_order: order } });
+        return prisma.habitSection.updateMany({ where: { id: i.id, user_id: user.id }, data: { display_order: order } });
       }),
   ]);
   revalidatePath('/');
@@ -259,17 +277,19 @@ export async function createSection(input: {
   title: string;
   subtitle?: string;
 }): Promise<HabitSectionRecord> {
+  const user = await getCurrentUser();
   const maxOrder = await prisma.$queryRaw<{ max: number | null }[]>`
     SELECT MAX(display_order) as max FROM (
-      SELECT display_order FROM habits
+      SELECT display_order FROM habits WHERE user_id = ${user.id}
       UNION ALL
-      SELECT display_order FROM habit_sections
+      SELECT display_order FROM habit_sections WHERE user_id = ${user.id}
     ) t
   `;
   const displayOrder = (maxOrder[0]?.max ?? -1) + 1;
 
   const section = await prisma.habitSection.create({
     data: {
+      user_id: user.id,
       title: input.title.trim(),
       subtitle: input.subtitle?.trim() || null,
       display_order: displayOrder,
@@ -284,18 +304,22 @@ export async function updateSection(input: {
   title: string;
   subtitle?: string | null;
 }): Promise<HabitSectionRecord> {
-  const section = await prisma.habitSection.update({
-    where: { id: input.id },
+  const user = await getCurrentUser();
+  const section = await prisma.habitSection.updateMany({
+    where: { id: input.id, user_id: user.id },
     data: {
       title: input.title.trim(),
       subtitle: input.subtitle?.trim() || null,
     },
   });
+  if (section.count === 0) throw new Error('Section not found');
+  const updated = await prisma.habitSection.findUniqueOrThrow({ where: { id: input.id } });
   revalidatePath('/');
-  return toSectionRecord(section);
+  return toSectionRecord(updated);
 }
 
 export async function deleteSection(id: string): Promise<void> {
-  await prisma.habitSection.delete({ where: { id } });
+  const user = await getCurrentUser();
+  await prisma.habitSection.deleteMany({ where: { id, user_id: user.id } });
   revalidatePath('/');
 }

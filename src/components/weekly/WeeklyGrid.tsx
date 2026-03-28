@@ -65,12 +65,15 @@ function AdvancedView({ habits, days, entriesByHabitAndDate, streaks, weekStart 
   }
 
   return (
-    <table className="w-full text-sm">
-      <thead>
+    <table className="w-full text-sm border-separate border-spacing-0">
+      <thead className="sticky top-0 z-10 bg-white shadow-[0_1px_0_0_#ede9fe]">
         <tr>
-          <th className="text-left text-xs font-medium text-violet-400 py-2 pr-2 min-w-[120px]"></th>
+          <th className="text-left text-xs font-medium text-violet-400 py-2 pr-2 min-w-[120px] bg-white"></th>
           {DAY_LABELS.map((d) => (
-            <th key={d} className="text-center text-xs font-medium text-violet-400 py-2 px-1 w-10">
+            <th
+              key={d}
+              className="text-center text-xs font-medium text-violet-500 py-2 px-1 w-10 border-l border-violet-100"
+            >
               {d}
             </th>
           ))}
@@ -92,7 +95,7 @@ function AdvancedView({ habits, days, entriesByHabitAndDate, streaks, weekStart 
             <tr key={`${habit.id}-header`}>
               <td
                 colSpan={8}
-                className={`px-2 pb-1 ${habitIdx > 0 ? 'pt-5 border-t-2 border-violet-100' : 'pt-2'}`}
+                className={`px-2 pb-1 ${habitIdx > 0 ? 'pt-5 border-t-2 border-violet-200' : 'pt-2'}`}
               >
                 <div className="flex items-center gap-2">
                   <span className="text-sm font-bold text-[#1E1B4B]">{habit.name}</span>
@@ -131,10 +134,12 @@ function AdvancedView({ habits, days, entriesByHabitAndDate, streaks, weekStart 
                 </td>
                 {days.map((dateStr) => {
                   const entry = habitEntries[dateStr];
+                  const baseCellCls = `text-center py-2 px-1 border-l border-violet-100`;
+
                   if (!entry) {
                     return (
-                      <td key={dateStr} className="text-center py-2 px-1 text-xs text-violet-200">
-                        –
+                      <td key={dateStr} className={baseCellCls}>
+                        <span className="text-xs text-violet-300 font-medium select-none">·</span>
                       </td>
                     );
                   }
@@ -146,7 +151,7 @@ function AdvancedView({ habits, days, entriesByHabitAndDate, streaks, weekStart 
                     const isExpanded = expandedTextKey === textKey;
 
                     return (
-                      <td key={dateStr} className="text-center py-2 px-1">
+                      <td key={dateStr} className={baseCellCls}>
                         {hasText ? (
                           <button
                             type="button"
@@ -161,7 +166,7 @@ function AdvancedView({ habits, days, entriesByHabitAndDate, streaks, weekStart 
                             <TextNoteIcon />
                           </button>
                         ) : (
-                          <span className="text-xs text-violet-200">–</span>
+                          <span className="text-xs text-violet-300 font-medium select-none">·</span>
                         )}
                       </td>
                     );
@@ -170,9 +175,9 @@ function AdvancedView({ habits, days, entriesByHabitAndDate, streaks, weekStart 
                   const display = fieldDisplay(entry, field);
                   const isEmpty = display === '–';
                   return (
-                    <td key={dateStr} className="text-center py-2 px-1">
+                    <td key={dateStr} className={baseCellCls}>
                       {isEmpty ? (
-                        <span className="text-xs text-violet-200">–</span>
+                        <span className="text-xs text-violet-300 font-medium select-none">·</span>
                       ) : (
                         <span className={`inline-block text-xs px-1.5 py-0.5 rounded-md ${
                           isCompletionField

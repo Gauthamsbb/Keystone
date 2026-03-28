@@ -28,7 +28,7 @@ function MultiSelectField({
   const [isOpen, setIsOpen] = useState(false);
   const [dropdownStyle, setDropdownStyle] = useState<{ top: number; left: number; width: number } | null>(null);
   const [newOpt, setNewOpt] = useState('');
-  const triggerRef = useRef<HTMLButtonElement>(null);
+  const triggerRef = useRef<HTMLDivElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
   function openDropdown() {
@@ -137,11 +137,13 @@ function MultiSelectField({
   return (
     <div className="flex flex-col gap-1.5">
       <label className="text-sm font-semibold text-[#1E1B4B]">{field.label}</label>
-      <button
+      <div
         ref={triggerRef}
-        type="button"
+        role="button"
+        tabIndex={0}
         onClick={() => isOpen ? setIsOpen(false) : openDropdown()}
-        className="w-full flex items-center gap-2 rounded-xl border border-violet-200 bg-violet-50/30 px-3 py-2.5 text-left focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-transparent shadow-sm min-h-[46px]"
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); isOpen ? setIsOpen(false) : openDropdown(); } }}
+        className="w-full flex items-center gap-2 rounded-xl border border-violet-200 bg-violet-50/30 px-3 py-2.5 text-left focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-transparent shadow-sm min-h-[46px] cursor-default"
       >
         {selected.length === 0 ? (
           <span className="text-sm text-gray-400 flex-1">Select options…</span>
@@ -171,7 +173,7 @@ function MultiSelectField({
         >
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
         </svg>
-      </button>
+      </div>
       {dropdownContent}
     </div>
   );

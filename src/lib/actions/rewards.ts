@@ -5,6 +5,8 @@ import { prisma } from '@/lib/prisma';
 import { calculateStreak } from '@/lib/utils/progress';
 import { logHabitChange } from './changelog';
 import { getHabitHistory } from './entries';
+import { writeAuditLog } from './audit';
+import { getCurrentUser } from '@/lib/supabase/get-user';
 import type {
   HabitRecord,
   InputSchema,
@@ -109,15 +111,13 @@ function toBucketRecord(raw: {
 // ── Read ──────────────────────────────────────────────────────────────────────
 
 export async function getBuckets(): Promise<RewardBucketRecord[]> {
+  const user = await getCurrentUser();
   const buckets = await prisma.rewardBucket.findMany({
+    where: { user_id: user.id },
     orderBy: { display_order: 'asc' },
     include: {
-      habits: {
-        include: { habit: true },
-      },
-      milestones: {
-        orderBy: { display_order: 'asc' },
-      },
+      habits: { include: { habit: true } },
+      milestones: { orderBy: { display_order: 'asc' } },
     },
   });
   return buckets.map((b) => toBucketRecord(b));
@@ -127,10 +127,8 @@ export async function getBucketsWithStreaks(): Promise<BucketWithStreaks[]> {
   const buckets = await getBuckets();
   const now = new Date();
 
-  // Collect unique habit IDs across all buckets
   const habitIds = [...new Set(buckets.flatMap((b) => b.habits.map((bh) => bh.habit_id)))];
 
-  // Fetch history for all habits in parallel
   const historiesByHabitId: Record<string, Awaited<ReturnType<typeof getHabitHistory>>> = {};
   await Promise.all(
     habitIds.map(async (id) => {
@@ -154,7 +152,10 @@ export async function createBucket(input: {
   name: string;
   description?: string;
 }): Promise<RewardBucketRecord> {
+  const user = await getCurrentUser();
+
   const maxOrder = await prisma.rewardBucket.findFirst({
+    where: { user_id: user.id },
     orderBy: { display_order: 'desc' },
     select: { display_order: true },
   });
@@ -162,17 +163,16 @@ export async function createBucket(input: {
 
   const bucket = await prisma.rewardBucket.create({
     data: {
+      user_id: user.id,
       name: input.name.trim(),
       description: input.description?.trim() || null,
       display_order: displayOrder,
     },
-    include: {
-      habits: { include: { habit: true } },
-      milestones: true,
-    },
+    include: { habits: { include: { habit: true } }, milestones: true },
   });
 
-  await logHabitChange({ habit_id: bucket.id, habit_name: bucket.name, event: 'reward_bucket_created' });
+  await logHabitChange({ user_id: user.id, habit_id: bucket.id, habit_name: bucket.name, event: 'reward_bucket_created' });
+  await writeAuditLog(user.id, 'bucket_created', 'reward_buckets', bucket.id, { name: bucket.name });
   revalidatePath('/rewards');
   revalidatePath('/rewards/manage');
   return toBucketRecord(bucket);
@@ -183,10 +183,13 @@ export async function updateBucket(input: {
   name?: string;
   description?: string | null;
 }): Promise<void> {
-  const existing = await prisma.rewardBucket.findUnique({
-    where: { id: input.id },
+  const user = await getCurrentUser();
+  const existing = await prisma.rewardBucket.findFirst({
+    where: { id: input.id, user_id: user.id },
     select: { name: true, description: true },
   });
+  if (!existing) throw new Error('Bucket not found');
+
   await prisma.rewardBucket.update({
     where: { id: input.id },
     data: {
@@ -194,42 +197,47 @@ export async function updateBucket(input: {
       ...('description' in input && { description: input.description?.trim() || null }),
     },
   });
+
   const changedDetails: Record<string, unknown> = {};
-  if (input.name !== undefined && input.name.trim() !== existing?.name) {
-    changedDetails.name = { from: existing?.name, to: input.name.trim() };
+  if (input.name !== undefined && input.name.trim() !== existing.name) {
+    changedDetails.name = { from: existing.name, to: input.name.trim() };
   }
   if ('description' in input) {
     const newDesc = input.description?.trim() || null;
-    if (newDesc !== existing?.description) {
-      changedDetails.description = { from: existing?.description, to: newDesc };
+    if (newDesc !== existing.description) {
+      changedDetails.description = { from: existing.description, to: newDesc };
     }
   }
   if (Object.keys(changedDetails).length > 0) {
     await logHabitChange({
+      user_id: user.id,
       habit_id: input.id,
-      habit_name: existing?.name ?? input.name ?? input.id,
+      habit_name: existing.name,
       event: 'reward_bucket_updated',
       details: changedDetails,
     });
+    await writeAuditLog(user.id, 'bucket_updated', 'reward_buckets', input.id, changedDetails);
   }
   revalidatePath('/rewards');
   revalidatePath('/rewards/manage');
 }
 
 export async function deleteBucket(id: string): Promise<void> {
-  const existing = await prisma.rewardBucket.findUnique({ where: { id }, select: { name: true } });
+  const user = await getCurrentUser();
+  const existing = await prisma.rewardBucket.findFirst({ where: { id, user_id: user.id }, select: { name: true } });
+  if (!existing) throw new Error('Bucket not found');
   await prisma.rewardBucket.delete({ where: { id } });
-  if (existing) {
-    await logHabitChange({ habit_id: null, habit_name: existing.name, event: 'reward_bucket_deleted' });
-  }
+  await logHabitChange({ user_id: user.id, habit_id: null, habit_name: existing.name, event: 'reward_bucket_deleted' });
+  await writeAuditLog(user.id, 'bucket_deleted', 'reward_buckets', id, { name: existing.name });
   revalidatePath('/rewards');
   revalidatePath('/rewards/manage');
 }
 
 export async function reorderBuckets(orderedIds: string[]): Promise<void> {
+  const user = await getCurrentUser();
   await prisma.$transaction(
     orderedIds.map((id, index) =>
-      prisma.rewardBucket.update({ where: { id }, data: { display_order: index } })
+      prisma.rewardBucket.updateMany({ where: { id, user_id: user.id }, data: { display_order: index } })
     )
   );
   revalidatePath('/rewards');
@@ -239,34 +247,39 @@ export async function reorderBuckets(orderedIds: string[]): Promise<void> {
 // ── Habit membership ──────────────────────────────────────────────────────────
 
 export async function addHabitToBucket(bucketId: string, habitId: string): Promise<void> {
+  const user = await getCurrentUser();
   const [bucket, habit] = await Promise.all([
-    prisma.rewardBucket.findUnique({ where: { id: bucketId }, select: { name: true } }),
-    prisma.habit.findUnique({ where: { id: habitId }, select: { name: true } }),
+    prisma.rewardBucket.findFirst({ where: { id: bucketId, user_id: user.id }, select: { name: true } }),
+    prisma.habit.findFirst({ where: { id: habitId, user_id: user.id }, select: { name: true } }),
   ]);
-  await prisma.bucketHabit.create({
-    data: { bucket_id: bucketId, habit_id: habitId },
-  });
+  if (!bucket || !habit) throw new Error('Bucket or habit not found');
+
+  await prisma.bucketHabit.create({ data: { bucket_id: bucketId, habit_id: habitId } });
   await logHabitChange({
+    user_id: user.id,
     habit_id: bucketId,
-    habit_name: bucket?.name ?? bucketId,
+    habit_name: bucket.name,
     event: 'reward_habit_added',
-    details: { habit_name: habit?.name ?? habitId },
+    details: { habit_name: habit.name },
   });
+  await writeAuditLog(user.id, 'bucket_habit_added', 'bucket_habits', bucketId, { habit_name: habit.name });
   revalidatePath('/rewards');
   revalidatePath('/rewards/manage');
 }
 
 export async function removeHabitFromBucket(bucketId: string, habitId: string): Promise<void> {
+  const user = await getCurrentUser();
   const [bucket, habit] = await Promise.all([
-    prisma.rewardBucket.findUnique({ where: { id: bucketId }, select: { name: true } }),
-    prisma.habit.findUnique({ where: { id: habitId }, select: { name: true } }),
+    prisma.rewardBucket.findFirst({ where: { id: bucketId, user_id: user.id }, select: { name: true } }),
+    prisma.habit.findFirst({ where: { id: habitId, user_id: user.id }, select: { name: true } }),
   ]);
-  await prisma.bucketHabit.deleteMany({
-    where: { bucket_id: bucketId, habit_id: habitId },
-  });
+  if (!bucket) throw new Error('Bucket not found');
+
+  await prisma.bucketHabit.deleteMany({ where: { bucket_id: bucketId, habit_id: habitId } });
   await logHabitChange({
+    user_id: user.id,
     habit_id: bucketId,
-    habit_name: bucket?.name ?? bucketId,
+    habit_name: bucket.name,
     event: 'reward_habit_removed',
     details: { habit_name: habit?.name ?? habitId },
   });
@@ -281,17 +294,19 @@ export async function addMilestone(input: {
   streak_target: number;
   reward: string;
 }): Promise<void> {
+  const user = await getCurrentUser();
   const [maxOrder, bucket] = await Promise.all([
     prisma.bucketMilestone.findFirst({
       where: { bucket_id: input.bucket_id },
       orderBy: { display_order: 'desc' },
       select: { display_order: true },
     }),
-    prisma.rewardBucket.findUnique({ where: { id: input.bucket_id }, select: { name: true } }),
+    prisma.rewardBucket.findFirst({ where: { id: input.bucket_id, user_id: user.id }, select: { name: true } }),
   ]);
+  if (!bucket) throw new Error('Bucket not found');
   const displayOrder = (maxOrder?.display_order ?? -1) + 1;
 
-  await prisma.bucketMilestone.create({
+  const milestone = await prisma.bucketMilestone.create({
     data: {
       bucket_id: input.bucket_id,
       streak_target: input.streak_target,
@@ -300,10 +315,15 @@ export async function addMilestone(input: {
     },
   });
   await logHabitChange({
+    user_id: user.id,
     habit_id: input.bucket_id,
-    habit_name: bucket?.name ?? input.bucket_id,
+    habit_name: bucket.name,
     event: 'reward_milestone_added',
     details: { streak_target: input.streak_target, reward: input.reward.trim() },
+  });
+  await writeAuditLog(user.id, 'milestone_added', 'bucket_milestones', milestone.id, {
+    bucket_name: bucket.name,
+    streak_target: input.streak_target,
   });
   revalidatePath('/rewards');
   revalidatePath('/rewards/manage');
@@ -314,10 +334,13 @@ export async function updateMilestone(input: {
   streak_target?: number;
   reward?: string;
 }): Promise<void> {
+  const user = await getCurrentUser();
   const milestone = await prisma.bucketMilestone.findUnique({
     where: { id: input.id },
-    select: { bucket_id: true, streak_target: true, reward: true, bucket: { select: { name: true } } },
+    select: { bucket_id: true, streak_target: true, reward: true, bucket: { select: { name: true, user_id: true } } },
   });
+  if (!milestone || milestone.bucket.user_id !== user.id) throw new Error('Milestone not found');
+
   await prisma.bucketMilestone.update({
     where: { id: input.id },
     data: {
@@ -326,12 +349,13 @@ export async function updateMilestone(input: {
     },
   });
   await logHabitChange({
-    habit_id: milestone?.bucket_id ?? null,
-    habit_name: milestone?.bucket?.name ?? input.id,
+    user_id: user.id,
+    habit_id: milestone.bucket_id,
+    habit_name: milestone.bucket.name,
     event: 'reward_milestone_updated',
     details: {
-      streak_target: input.streak_target ?? milestone?.streak_target,
-      reward: input.reward?.trim() ?? milestone?.reward,
+      streak_target: input.streak_target ?? milestone.streak_target,
+      reward: input.reward?.trim() ?? milestone.reward,
     },
   });
   revalidatePath('/rewards');
@@ -339,19 +363,21 @@ export async function updateMilestone(input: {
 }
 
 export async function deleteMilestone(id: string): Promise<void> {
+  const user = await getCurrentUser();
   const milestone = await prisma.bucketMilestone.findUnique({
     where: { id },
-    select: { bucket_id: true, streak_target: true, reward: true, bucket: { select: { name: true } } },
+    select: { bucket_id: true, streak_target: true, reward: true, bucket: { select: { name: true, user_id: true } } },
   });
+  if (!milestone || milestone.bucket.user_id !== user.id) throw new Error('Milestone not found');
+
   await prisma.bucketMilestone.delete({ where: { id } });
-  if (milestone) {
-    await logHabitChange({
-      habit_id: milestone.bucket_id,
-      habit_name: milestone.bucket?.name ?? milestone.bucket_id,
-      event: 'reward_milestone_deleted',
-      details: { streak_target: milestone.streak_target, reward: milestone.reward },
-    });
-  }
+  await logHabitChange({
+    user_id: user.id,
+    habit_id: milestone.bucket_id,
+    habit_name: milestone.bucket.name,
+    event: 'reward_milestone_deleted',
+    details: { streak_target: milestone.streak_target, reward: milestone.reward },
+  });
   revalidatePath('/rewards');
   revalidatePath('/rewards/manage');
 }

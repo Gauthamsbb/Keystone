@@ -1,0 +1,106 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model Habit {
+  id                  String        @id @default(uuid())
+  name                String
+  subtitle            String?
+  is_active           Boolean       @default(true)
+  weekly_quota        Int
+  input_schema        Json
+  completion_field_id Int?
+  completion_limit    Json?
+  timing_field_id     Int?
+  display_order       Int           @default(0)
+  bucketHabits        BucketHabit[]
+  entries             Entry[]
+
+  @@map("habits")
+}
+
+model HabitSection {
+  id            String  @id @default(uuid())
+  title         String
+  subtitle      String?
+  display_order Int     @default(0)
+
+  @@map("habit_sections")
+}
+
+model HabitChangeLog {
+  id         String   @id @default(uuid())
+  habit_id   String?
+  habit_name String
+  event      String
+  details    Json?
+  created_at DateTime @default(now())
+
+  @@map("habit_change_logs")
+}
+
+model Entry {
+  id       String       @id @default(uuid())
+  habit_id String
+  date     DateTime     @db.Date
+  habit    Habit        @relation(fields: [habit_id], references: [id], onDelete: Cascade)
+  values   EntryValue[]
+
+  @@unique([habit_id, date])
+  @@map("entries")
+}
+
+model EntryValue {
+  id            String   @id @default(uuid())
+  entry_id      String
+  field_id      Int
+  text_value    String?
+  int_value     Int?
+  duration_mins Int?
+  time_mins     Int?
+  boolean_value Boolean?
+  entry         Entry    @relation(fields: [entry_id], references: [id], onDelete: Cascade)
+
+  @@unique([entry_id, field_id])
+  @@map("entry_values")
+}
+
+model RewardBucket {
+  id            String            @id @default(uuid())
+  name          String
+  description   String?
+  display_order Int               @default(0)
+  created_at    DateTime          @default(now())
+  habits        BucketHabit[]
+  milestones    BucketMilestone[]
+
+  @@map("reward_buckets")
+}
+
+model BucketHabit {
+  id        String       @id @default(uuid())
+  bucket_id String
+  habit_id  String
+  bucket    RewardBucket @relation(fields: [bucket_id], references: [id], onDelete: Cascade)
+  habit     Habit        @relation(fields: [habit_id], references: [id], onDelete: Cascade)
+
+  @@unique([bucket_id, habit_id])
+  @@map("bucket_habits")
+}
+
+model BucketMilestone {
+  id            String       @id @default(uuid())
+  bucket_id     String
+  streak_target Int
+  reward        String
+  display_order Int          @default(0)
+  bucket        RewardBucket @relation(fields: [bucket_id], references: [id], onDelete: Cascade)
+
+  @@map("bucket_milestones")
+}
